@@ -1,0 +1,189 @@
+-- LocalScript | StarterPlayerScripts
+-- Подсветка enemy, автотелепорт от монстров на безопасное место
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+
+local player = Players.LocalPlayer
+local character = player.Character or player.CharacterAdded:Wait()
+
+-- Папки
+local MAP             = Workspace:WaitForChild("Map")
+local ENTITIES_FOLDER = MAP:WaitForChild("Entities")
+local PLACEABLE_FOLDER = MAP:WaitForChild("Placeable")
+
+-- ─── Настройки ────────────────────────────────────────────────
+local ENEMY_DANGER_RADIUS      = 20   -- радиус угрозы (studs) — если enemy ближе, телепортируем
+local SAFE_FROM_ENEMY_RADIUS   = 35   -- безопасное расстояние от enemy у цели телепорта
+local MAX_TELEPORT_DIST        = 45   -- макс. дальность телепорта (anti-cheat friendly)
+local MIN_TELEPORT_DIST        = 6    -- минимум, чтобы не телепортировало на то же место
+local CHECK_INTERVAL           = 0.5  -- секунды между проверками
+local HIGHLIGHT_FILL           = Color3.fromRGB(255, 30, 30)
+local HIGHLIGHT_OUTLINE        = Color3.fromRGB(255, 160, 0)
+-- ──────────────────────────────────────────────────────────────
+
+-- Добавляет Highlight на enemy-модель
+local function addHighlight(model)
+	if model:FindFirstChildOfClass("Highlight") then return end
+	local hl = Instance.new("Highlight")
+	hl.FillColor          = HIGHLIGHT_FILL
+	hl.OutlineColor       = HIGHLIGHT_OUTLINE
+	hl.FillTransparency   = 0.45
+	hl.OutlineTransparency = 0
+	hl.Adornee            = model
+	hl.Parent             = model
+end
+
+-- Проверяем, является ли модель enemy (начинается с "enemy", без учёта регистра)
+local function isEnemy(model)
+	return model.Name:lower():sub(1, 5) == "enemy"
+end
+
+-- Подсвечиваем всех существующих enemy
+local function highlightAllEnemies()
+	for _, model in ipairs(ENTITIES_FOLDER:GetChildren()) do
+		if model:IsA("Model") and isEnemy(model) then
+			addHighlight(model)
+		end
+	end
+end
+
+-- Следим за новыми моделями в Entities
+ENTITIES_FOLDER.ChildAdded:Connect(function(child)
+	task.wait(0.1) -- ждём полной загрузки модели
+	if child:IsA("Model") and isEnemy(child) then
+		addHighlight(child)
+	end
+end)
+
+-- Возвращает список позиций всех активных enemy
+local function getEnemyPositions()
+	local positions = {}
+	for _, model in ipairs(ENTITIES_FOLDER:GetChildren()) do
+		if model:IsA("Model") and isEnemy(model) then
+			local root = model:FindFirstChild("HumanoidRootPart")
+				or model.PrimaryPart
+				or model:FindFirstChildOfClass("BasePart")
+			if root then
+				table.insert(positions, root.Position)
+			end
+		end
+	end
+	return positions
+end
+
+-- Проверяет, далеко ли позиция от всех enemy
+local function isSafeFromEnemies(pos, enemyPositions)
+	for _, ep in ipairs(enemyPositions) do
+		if (pos - ep).Magnitude < SAFE_FROM_ENEMY_RADIUS then
+			return false
+		end
+	end
+	return true
+end
+
+-- Проверяет, есть ли твёрдая поверхность под позицией (не воздух)
+-- Возвращает точную позицию поверхности или nil
+local function getSurfaceBelow(pos, ignoreList)
+	local params = RaycastParams.new()
+	params.FilterDescendantsInstances = ignoreList
+	params.FilterType = Enum.RaycastFilterType.Exclude
+
+	local origin    = pos + Vector3.new(0, 4, 0)
+	local direction = Vector3.new(0, -12, 0)
+	local result    = Workspace:Raycast(origin, direction, params)
+
+	if result then
+		return result.Position
+	end
+	return nil
+end
+
+-- Находит ближайшую безопасную точку из Placeable-парта
+local function findSafeTeleportPosition(playerPos, enemyPositions, ignoreList)
+	local candidates = {}
+
+	for _, part in ipairs(PLACEABLE_FOLDER:GetDescendants()) do
+		if part:IsA("BasePart") then
+			-- Цель — на верхней грани парта
+			local targetPos = part.Position + Vector3.new(0, part.Size.Y / 2 + 3.5, 0)
+			local dist      = (targetPos - playerPos).Magnitude
+
+			if dist >= MIN_TELEPORT_DIST and dist <= MAX_TELEPORT_DIST then
+				table.insert(candidates, { pos = targetPos, dist = dist })
+			end
+		end
+	end
+
+	-- Сортируем по расстоянию: сначала ближние (anti-cheat)
+	table.sort(candidates, function(a, b) return a.dist < b.dist end)
+
+	for _, c in ipairs(candidates) do
+		-- Проверяем: есть ли поверхность и безопасно ли от enemy
+		local surface = getSurfaceBelow(c.pos, ignoreList)
+		if surface and isSafeFromEnemies(c.pos, enemyPositions) then
+			return surface + Vector3.new(0, 3, 0) -- чуть выше поверхности
+		end
+	end
+
+	return nil
+end
+
+-- ─── Главный цикл ─────────────────────────────────────────────
+local lastCheck = 0
+local teleportCooldown = false -- чтобы не спамило телепорты
+
+RunService.Heartbeat:Connect(function()
+	if tick() - lastCheck < CHECK_INTERVAL then return end
+	lastCheck = tick()
+
+	-- Обновляем персонажа после рестарта
+	character = player.Character
+	if not character then return end
+
+	local hrp = character:FindFirstChild("HumanoidRootPart")
+	if not hrp then return end
+
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if not humanoid or humanoid.Health <= 0 then return end
+
+	if teleportCooldown then return end
+
+	-- Проверяем угрозу
+	local enemyPositions = getEnemyPositions()
+	local playerPos      = hrp.Position
+	local inDanger       = false
+
+	for _, ep in ipairs(enemyPositions) do
+		if (playerPos - ep).Magnitude < ENEMY_DANGER_RADIUS then
+			inDanger = true
+			break
+		end
+	end
+
+	if not inDanger then return end
+
+	-- Ищем безопасное место
+	local ignoreList = { character }
+	local safePos = findSafeTeleportPosition(playerPos, enemyPositions, ignoreList)
+
+	if safePos then
+		teleportCooldown = true
+		hrp.CFrame = CFrame.new(safePos)
+		print("[SafeTP] Телепортирован в безопасное место:", safePos)
+		task.wait(1.5) -- cooldown между телепортами
+		teleportCooldown = false
+	else
+		print("[SafeTP] Безопасная позиция не найдена рядом!")
+	end
+end)
+
+-- Следим за респавном
+player.CharacterAdded:Connect(function(newChar)
+	character = newChar
+end)
+
+-- Запуск
+highlightAllEnemies()
+print("[SafeTP] Скрипт запущен.")
