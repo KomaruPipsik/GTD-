@@ -1,46 +1,107 @@
 -- LocalScript | StarterPlayerScripts
--- Подсветка enemy, автотелепорт от монстров на безопасное место
+-- Подсветка enemy + пошаговый безопасный телепорт (anti-cheat friendly)
 
-local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
-local Workspace = game:GetService("Workspace")
+local Players      = game:GetService("Players")
+local RunService   = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local Workspace    = game:GetService("Workspace")
+local TweenService = game:GetService("TweenService")
 
-local player = Players.LocalPlayer
+local player    = Players.LocalPlayer
 local character = player.Character or player.CharacterAdded:Wait()
+local playerGui = player:WaitForChild("PlayerGui")
 
--- Папки
-local MAP             = Workspace:WaitForChild("Map")
-local ENTITIES_FOLDER = MAP:WaitForChild("Entities")
+local MAP              = Workspace:WaitForChild("Map")
+local ENTITIES_FOLDER  = MAP:WaitForChild("Entities")
 local PLACEABLE_FOLDER = MAP:WaitForChild("Placeable")
 
 -- ─── Настройки ────────────────────────────────────────────────
-local ENEMY_DANGER_RADIUS      = 20   -- радиус угрозы (studs) — если enemy ближе, телепортируем
-local SAFE_FROM_ENEMY_RADIUS   = 35   -- безопасное расстояние от enemy у цели телепорта
-local MAX_TELEPORT_DIST        = 45   -- макс. дальность телепорта (anti-cheat friendly)
-local MIN_TELEPORT_DIST        = 6    -- минимум, чтобы не телепортировало на то же место
-local CHECK_INTERVAL           = 0.5  -- секунды между проверками
-local HIGHLIGHT_FILL           = Color3.fromRGB(255, 30, 30)
-local HIGHLIGHT_OUTLINE        = Color3.fromRGB(255, 160, 0)
+local ENEMY_DANGER_RADIUS    = 20    -- радиус угрозы от enemy
+local SAFE_FROM_ENEMY_RADIUS = 35    -- мин. дистанция от enemy у цели
+local MAX_TELEPORT_DIST      = 150   -- макс. дальность поиска точки (можно далеко)
+local MIN_TELEPORT_DIST      = 6
+local CHECK_INTERVAL         = 0.5
+
+local STEP_SIZE              = 8     -- studs за один шаг (anti-cheat friendly)
+local STEP_DELAY             = 0.07  -- секунды между шагами
+local TELEPORT_COOLDOWN      = 2.0   -- cooldown после телепорта
+
+local HIGHLIGHT_FILL         = Color3.fromRGB(255, 30, 30)
+local HIGHLIGHT_OUTLINE      = Color3.fromRGB(255, 160, 0)
 -- ──────────────────────────────────────────────────────────────
 
--- Добавляет Highlight на enemy-модель
-local function addHighlight(model)
-	if model:FindFirstChildOfClass("Highlight") then return end
-	local hl = Instance.new("Highlight")
-	hl.FillColor          = HIGHLIGHT_FILL
-	hl.OutlineColor       = HIGHLIGHT_OUTLINE
-	hl.FillTransparency   = 0.45
-	hl.OutlineTransparency = 0
-	hl.Adornee            = model
-	hl.Parent             = model
+local scriptEnabled    = true
+local teleportCooldown = false
+
+-- ═══════════════════════════════════════════════════════════════
+-- GUI: кнопка включения/выключения
+-- ═══════════════════════════════════════════════════════════════
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name             = "SafeTPGui"
+screenGui.ResetOnSpawn     = false
+screenGui.ZIndexBehavior   = Enum.ZIndexBehavior.Sibling
+screenGui.Parent           = playerGui
+
+local btn = Instance.new("TextButton")
+btn.Size            = UDim2.new(0, 160, 0, 40)
+btn.Position        = UDim2.new(1, -170, 0, 10) -- правый верхний угол
+btn.AnchorPoint     = Vector2.new(0, 0)
+btn.BackgroundColor3 = Color3.fromRGB(40, 180, 80)
+btn.TextColor3      = Color3.fromRGB(255, 255, 255)
+btn.Text            = "✅ SafeTP: ВКЛ"
+btn.Font            = Enum.Font.GothamBold
+btn.TextSize        = 15
+btn.BorderSizePixel = 0
+btn.Parent          = screenGui
+
+local corner = Instance.new("UICorner")
+corner.CornerRadius = UDim.new(0, 10)
+corner.Parent       = btn
+
+local function updateButton()
+	if scriptEnabled then
+		btn.BackgroundColor3 = Color3.fromRGB(40, 180, 80)
+		btn.Text             = "✅ SafeTP: ВКЛ"
+	else
+		btn.BackgroundColor3 = Color3.fromRGB(180, 40, 40)
+		btn.Text             = "❌ SafeTP: ВЫКЛ"
+	end
 end
 
--- Проверяем, является ли модель enemy (начинается с "enemy", без учёта регистра)
+btn.MouseButton1Click:Connect(function()
+	scriptEnabled = not scriptEnabled
+	updateButton()
+	print("[SafeTP] Скрипт:", scriptEnabled and "ВКЛЮЧЁН" or "ВЫКЛЮЧЁН")
+end)
+
+-- Также Toggle на клавишу F5
+UserInputService.InputBegan:Connect(function(input, gpe)
+	if gpe then return end
+	if input.KeyCode == Enum.KeyCode.F5 then
+		scriptEnabled = not scriptEnabled
+		updateButton()
+		print("[SafeTP] Скрипт:", scriptEnabled and "ВКЛЮЧЁН" or "ВЫКЛЮЧЁН")
+	end
+end)
+
+-- ═══════════════════════════════════════════════════════════════
+-- Подсветка enemy
+-- ═══════════════════════════════════════════════════════════════
 local function isEnemy(model)
 	return model.Name:lower():sub(1, 5) == "enemy"
 end
 
--- Подсвечиваем всех существующих enemy
+local function addHighlight(model)
+	if model:FindFirstChildOfClass("Highlight") then return end
+	local hl = Instance.new("Highlight")
+	hl.FillColor           = HIGHLIGHT_FILL
+	hl.OutlineColor        = HIGHLIGHT_OUTLINE
+	hl.FillTransparency    = 0.45
+	hl.OutlineTransparency = 0
+	hl.Adornee             = model
+	hl.Parent              = model
+end
+
 local function highlightAllEnemies()
 	for _, model in ipairs(ENTITIES_FOLDER:GetChildren()) do
 		if model:IsA("Model") and isEnemy(model) then
@@ -49,15 +110,16 @@ local function highlightAllEnemies()
 	end
 end
 
--- Следим за новыми моделями в Entities
 ENTITIES_FOLDER.ChildAdded:Connect(function(child)
-	task.wait(0.1) -- ждём полной загрузки модели
+	task.wait(0.1)
 	if child:IsA("Model") and isEnemy(child) then
 		addHighlight(child)
 	end
 end)
 
--- Возвращает список позиций всех активных enemy
+-- ═══════════════════════════════════════════════════════════════
+-- Логика поиска безопасной позиции
+-- ═══════════════════════════════════════════════════════════════
 local function getEnemyPositions()
 	local positions = {}
 	for _, model in ipairs(ENTITIES_FOLDER:GetChildren()) do
@@ -73,7 +135,6 @@ local function getEnemyPositions()
 	return positions
 end
 
--- Проверяет, далеко ли позиция от всех enemy
 local function isSafeFromEnemies(pos, enemyPositions)
 	for _, ep in ipairs(enemyPositions) do
 		if (pos - ep).Magnitude < SAFE_FROM_ENEMY_RADIUS then
@@ -83,30 +144,19 @@ local function isSafeFromEnemies(pos, enemyPositions)
 	return true
 end
 
--- Проверяет, есть ли твёрдая поверхность под позицией (не воздух)
--- Возвращает точную позицию поверхности или nil
 local function getSurfaceBelow(pos, ignoreList)
 	local params = RaycastParams.new()
 	params.FilterDescendantsInstances = ignoreList
 	params.FilterType = Enum.RaycastFilterType.Exclude
-
-	local origin    = pos + Vector3.new(0, 4, 0)
-	local direction = Vector3.new(0, -12, 0)
-	local result    = Workspace:Raycast(origin, direction, params)
-
-	if result then
-		return result.Position
-	end
-	return nil
+	local result = Workspace:Raycast(pos + Vector3.new(0, 4, 0), Vector3.new(0, -12, 0), params)
+	return result and result.Position or nil
 end
 
--- Находит ближайшую безопасную точку из Placeable-парта
-local function findSafeTeleportPosition(playerPos, enemyPositions, ignoreList)
+local function findSafeTarget(playerPos, enemyPositions, ignoreList)
 	local candidates = {}
 
 	for _, part in ipairs(PLACEABLE_FOLDER:GetDescendants()) do
 		if part:IsA("BasePart") then
-			-- Цель — на верхней грани парта
 			local targetPos = part.Position + Vector3.new(0, part.Size.Y / 2 + 3.5, 0)
 			local dist      = (targetPos - playerPos).Magnitude
 
@@ -116,39 +166,72 @@ local function findSafeTeleportPosition(playerPos, enemyPositions, ignoreList)
 		end
 	end
 
-	-- Сортируем по расстоянию: сначала ближние (anti-cheat)
+	-- Сортируем по расстоянию (ближние первые)
 	table.sort(candidates, function(a, b) return a.dist < b.dist end)
 
 	for _, c in ipairs(candidates) do
-		-- Проверяем: есть ли поверхность и безопасно ли от enemy
 		local surface = getSurfaceBelow(c.pos, ignoreList)
 		if surface and isSafeFromEnemies(c.pos, enemyPositions) then
-			return surface + Vector3.new(0, 3, 0) -- чуть выше поверхности
+			return surface + Vector3.new(0, 3, 0)
 		end
 	end
 
 	return nil
 end
 
--- ─── Главный цикл ─────────────────────────────────────────────
+-- ═══════════════════════════════════════════════════════════════
+-- Пошаговый телепорт (anti-cheat friendly)
+-- Перемещает игрока маленькими шагами по STEP_SIZE studs
+-- ═══════════════════════════════════════════════════════════════
+local function stepTeleport(hrp, targetPos)
+	local currentPos = hrp.Position
+
+	-- Считаем сколько шагов нужно
+	local totalDist = (targetPos - currentPos).Magnitude
+	local steps     = math.ceil(totalDist / STEP_SIZE)
+
+	for i = 1, steps do
+		-- Проверяем что персонаж ещё жив
+		local char = player.Character
+		if not char then break end
+		local h = char:FindFirstChildOfClass("Humanoid")
+		if not h or h.Health <= 0 then break end
+
+		local alpha    = i / steps
+		local stepPos  = currentPos:Lerp(targetPos, alpha)
+
+		-- Ищем поверхность на каждом промежуточном шаге
+		local ignoreList = { char }
+		local surface = getSurfaceBelow(stepPos, ignoreList)
+		if surface then
+			stepPos = surface + Vector3.new(0, 3, 0)
+		end
+
+		hrp.CFrame = CFrame.new(stepPos)
+		task.wait(STEP_DELAY)
+	end
+
+	-- Финальная точная установка
+	hrp.CFrame = CFrame.new(targetPos)
+end
+
+-- ═══════════════════════════════════════════════════════════════
+-- Главный цикл
+-- ═══════════════════════════════════════════════════════════════
 local lastCheck = 0
-local teleportCooldown = false -- чтобы не спамило телепорты
 
 RunService.Heartbeat:Connect(function()
+	if not scriptEnabled then return end
 	if tick() - lastCheck < CHECK_INTERVAL then return end
 	lastCheck = tick()
+	if teleportCooldown then return end
 
-	-- Обновляем персонажа после рестарта
 	character = player.Character
 	if not character then return end
 
-	local hrp = character:FindFirstChild("HumanoidRootPart")
-	if not hrp then return end
-
+	local hrp      = character:FindFirstChild("HumanoidRootPart")
 	local humanoid = character:FindFirstChildOfClass("Humanoid")
-	if not humanoid or humanoid.Health <= 0 then return end
-
-	if teleportCooldown then return end
+	if not hrp or not humanoid or humanoid.Health <= 0 then return end
 
 	-- Проверяем угрозу
 	local enemyPositions = getEnemyPositions()
@@ -164,26 +247,27 @@ RunService.Heartbeat:Connect(function()
 
 	if not inDanger then return end
 
-	-- Ищем безопасное место
+	-- Ищем безопасную точку
 	local ignoreList = { character }
-	local safePos = findSafeTeleportPosition(playerPos, enemyPositions, ignoreList)
+	local safePos    = findSafeTarget(playerPos, enemyPositions, ignoreList)
 
 	if safePos then
 		teleportCooldown = true
-		hrp.CFrame = CFrame.new(safePos)
-		print("[SafeTP] Телепортирован в безопасное место:", safePos)
-		task.wait(1.5) -- cooldown между телепортами
-		teleportCooldown = false
+		print("[SafeTP] Телепортирую по шагам →", safePos)
+		task.spawn(function()
+			stepTeleport(hrp, safePos)
+			task.wait(TELEPORT_COOLDOWN)
+			teleportCooldown = false
+		end)
 	else
-		print("[SafeTP] Безопасная позиция не найдена рядом!")
+		print("[SafeTP] Безопасная точка не найдена!")
 	end
 end)
 
--- Следим за респавном
 player.CharacterAdded:Connect(function(newChar)
 	character = newChar
 end)
 
 -- Запуск
 highlightAllEnemies()
-print("[SafeTP] Скрипт запущен.")
+print("[SafeTP] Скрипт запущен. Кнопка справа вверху / F5 — toggle.")
