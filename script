@@ -13,7 +13,6 @@ local MAP              = Workspace:WaitForChild("Map")
 local ENTITIES_FOLDER  = MAP:WaitForChild("Entities")
 local PLACEABLE_FOLDER = MAP:WaitForChild("Placeable")
 
--- ─── Настройки ────────────────────────────────────────────────
 local ENEMY_DANGER_RADIUS    = 20
 local SAFE_FROM_ENEMY_RADIUS = 35
 local MAX_TELEPORT_DIST      = 150
@@ -24,12 +23,9 @@ local SLIDE_STEP_DELAY       = 0.05
 local HIGHLIGHT_FILL         = Color3.fromRGB(255, 30, 30)
 local HIGHLIGHT_OUTLINE      = Color3.fromRGB(255, 160, 0)
 
--- Высота HumanoidRootPart над полом у стандартного персонажа Roblox
-local HRP_HEIGHT = 2.5
--- ──────────────────────────────────────────────────────────────
+local FLOOR_OFFSET = 1 -- насколько HRP выше пола (1 = немного в полу)
 
 local scriptEnabled = true
-local isMoving      = false
 
 -- ═══════════════════════════════════════════════════════════════
 -- GUI
@@ -62,19 +58,19 @@ debugFrame.Parent                 = screenGui
 Instance.new("UICorner", debugFrame).CornerRadius = UDim.new(0, 8)
 
 local debugLabel = Instance.new("TextLabel")
-debugLabel.Size                  = UDim2.new(1, -10, 1, -10)
-debugLabel.Position              = UDim2.new(0, 5, 0, 5)
+debugLabel.Size                   = UDim2.new(1, -10, 1, -10)
+debugLabel.Position               = UDim2.new(0, 5, 0, 5)
 debugLabel.BackgroundTransparency = 1
-debugLabel.TextColor3            = Color3.fromRGB(220, 220, 220)
-debugLabel.Font                  = Enum.Font.Code
-debugLabel.TextSize              = 13
-debugLabel.TextXAlignment        = Enum.TextXAlignment.Left
-debugLabel.TextYAlignment        = Enum.TextYAlignment.Top
-debugLabel.TextWrapped           = true
-debugLabel.Text                  = "Загрузка..."
-debugLabel.Parent                = debugFrame
+debugLabel.TextColor3             = Color3.fromRGB(220, 220, 220)
+debugLabel.Font                   = Enum.Font.Code
+debugLabel.TextSize               = 13
+debugLabel.TextXAlignment         = Enum.TextXAlignment.Left
+debugLabel.TextYAlignment         = Enum.TextYAlignment.Top
+debugLabel.TextWrapped            = true
+debugLabel.Text                   = "Загрузка..."
+debugLabel.Parent                 = debugFrame
 
-local function setDebug(text) debugLabel.Text = text end
+local function setDebug(t) debugLabel.Text = t end
 
 local function updateButton()
 	if scriptEnabled then
@@ -129,7 +125,7 @@ ENTITIES_FOLDER.ChildAdded:Connect(function(child)
 end)
 
 -- ═══════════════════════════════════════════════════════════════
--- Позиции enemy
+-- Enemy позиции
 -- ═══════════════════════════════════════════════════════════════
 local function getModelPosition(model)
 	local hrp = model:FindFirstChild("HumanoidRootPart")
@@ -160,24 +156,19 @@ local function isSafeFromEnemies(pos, enemyPositions)
 end
 
 -- ═══════════════════════════════════════════════════════════════
--- Поиск пола — надёжный метод
--- Кастит сверху вниз, возвращает Y поверхности или nil
+-- Пол
 -- ═══════════════════════════════════════════════════════════════
-local function findFloorY(x, z, referenceY, ignoreList)
+local function findFloorY(x, z, refY, ignoreList)
 	local params = RaycastParams.new()
 	params.FilterDescendantsInstances = ignoreList
 	params.FilterType = Enum.RaycastFilterType.Exclude
 
-	-- Начинаем луч сильно сверху чтобы не промахнуться по склонам
-	local originY   = referenceY + 50
-	local origin    = Vector3.new(x, originY, z)
-	local direction = Vector3.new(0, -120, 0)
-
-	local result = Workspace:Raycast(origin, direction, params)
-	if result then
-		return result.Position.Y
-	end
-	return nil
+	local result = Workspace:Raycast(
+		Vector3.new(x, refY + 50, z),
+		Vector3.new(0, -120, 0),
+		params
+	)
+	return result and result.Position.Y or nil
 end
 
 -- ═══════════════════════════════════════════════════════════════
@@ -196,13 +187,13 @@ local function findSafeTarget(playerPos, enemyPositions, ignoreList)
 	end
 
 	if #candidates == 0 then
-		-- Placeable пустой — ищем вокруг игрока по кругу
 		for angle = 0, 345, 15 do
 			for dist = 15, MAX_TELEPORT_DIST, 15 do
 				local rad = math.rad(angle)
-				local x   = playerPos.X + math.cos(rad) * dist
-				local z   = playerPos.Z + math.sin(rad) * dist
-				table.insert(candidates, { pos = Vector3.new(x, playerPos.Y, z), dist = dist })
+				table.insert(candidates, {
+					pos  = Vector3.new(playerPos.X + math.cos(rad) * dist, playerPos.Y, playerPos.Z + math.sin(rad) * dist),
+					dist = dist
+				})
 			end
 		end
 	end
@@ -212,7 +203,7 @@ local function findSafeTarget(playerPos, enemyPositions, ignoreList)
 	for _, c in ipairs(candidates) do
 		local floorY = findFloorY(c.pos.X, c.pos.Z, c.pos.Y, ignoreList)
 		if floorY then
-			local safePos = Vector3.new(c.pos.X, floorY + HRP_HEIGHT, c.pos.Z)
+			local safePos = Vector3.new(c.pos.X, floorY + FLOOR_OFFSET, c.pos.Z)
 			if isSafeFromEnemies(safePos, enemyPositions) then
 				return safePos
 			end
@@ -223,8 +214,7 @@ local function findSafeTarget(playerPos, enemyPositions, ignoreList)
 end
 
 -- ═══════════════════════════════════════════════════════════════
--- Скольжение по полу
--- На каждом шаге HRP ставится ТОЧНО на найденный пол
+-- Скольжение по полу — без кулдауна
 -- ═══════════════════════════════════════════════════════════════
 local function slideAlongFloor(hrp, targetPos, ignoreList)
 	local startPos  = hrp.Position
@@ -234,9 +224,9 @@ local function slideAlongFloor(hrp, targetPos, ignoreList)
 
 	if totalDist < 0.5 then return end
 
-	local steps    = math.max(1, math.ceil(totalDist / SLIDE_STEP_SIZE))
-	local noFloor  = 0
-	local lastFloorY = startPos.Y - HRP_HEIGHT -- реальная высота пола под стартом
+	local steps      = math.max(1, math.ceil(totalDist / SLIDE_STEP_SIZE))
+	local lastFloorY = startPos.Y - FLOOR_OFFSET
+	local noFloor    = 0
 
 	for i = 1, steps do
 		local char = player.Character
@@ -244,40 +234,32 @@ local function slideAlongFloor(hrp, targetPos, ignoreList)
 		local h = char:FindFirstChildOfClass("Humanoid")
 		if not h or h.Health <= 0 then break end
 
-		local t    = i / steps
-		local newX = startPos.X + dx * t
-		local newZ = startPos.Z + dz * t
-
-		-- Ищем пол относительно последнего известного пола
-		local floorY = findFloorY(newX, newZ, lastFloorY + HRP_HEIGHT, ignoreList)
+		local t      = i / steps
+		local newX   = startPos.X + dx * t
+		local newZ   = startPos.Z + dz * t
+		local floorY = findFloorY(newX, newZ, lastFloorY + FLOOR_OFFSET, ignoreList)
 
 		if floorY then
 			lastFloorY = floorY
 			noFloor    = 0
-			-- Ставим HRP ровно на пол: floorY + HRP_HEIGHT
-			hrp.CFrame = CFrame.new(newX, floorY + HRP_HEIGHT, newZ)
+			hrp.CFrame = CFrame.new(newX, floorY + FLOOR_OFFSET, newZ)
 		else
-			noFloor = noFloor + 1
-			if noFloor >= 4 then
-				-- Обрыв или стена — останавливаемся
-				break
-			end
-			-- Держим последнюю известную высоту пола
-			hrp.CFrame = CFrame.new(newX, lastFloorY + HRP_HEIGHT, newZ)
+			noFloor += 1
+			if noFloor >= 4 then break end
+			hrp.CFrame = CFrame.new(newX, lastFloorY + FLOOR_OFFSET, newZ)
 		end
 
 		task.wait(SLIDE_STEP_DELAY)
 	end
 
-	-- Финальная точная установка
-	local finalFloor = findFloorY(targetPos.X, targetPos.Z, lastFloorY + HRP_HEIGHT, ignoreList)
+	local finalFloor = findFloorY(targetPos.X, targetPos.Z, lastFloorY + FLOOR_OFFSET, ignoreList)
 	if finalFloor then
-		hrp.CFrame = CFrame.new(targetPos.X, finalFloor + HRP_HEIGHT, targetPos.Z)
+		hrp.CFrame = CFrame.new(targetPos.X, finalFloor + FLOOR_OFFSET, targetPos.Z)
 	end
 end
 
 -- ═══════════════════════════════════════════════════════════════
--- Главный цикл — без кулдауна
+-- Главный цикл
 -- ═══════════════════════════════════════════════════════════════
 local lastCheck = 0
 
@@ -285,11 +267,13 @@ RunService.Heartbeat:Connect(function()
 	if tick() - lastCheck < CHECK_INTERVAL then return end
 	lastCheck = tick()
 
-	character = player.Character
-	if not character then
-		setDebug("❌ Нет персонажа")
+	if not scriptEnabled then
+		setDebug("⏸ Скрипт выключен")
 		return
 	end
+
+	character = player.Character
+	if not character then setDebug("❌ Нет персонажа") return end
 
 	local hrp      = character:FindFirstChild("HumanoidRootPart")
 	local humanoid = character:FindFirstChildOfClass("Humanoid")
@@ -297,8 +281,8 @@ RunService.Heartbeat:Connect(function()
 
 	local enemyPositions = getEnemyPositions()
 	local playerPos      = hrp.Position
+	local nearestDist    = math.huge
 
-	local nearestDist = math.huge
 	for _, ep in ipairs(enemyPositions) do
 		local d = (playerPos - ep).Magnitude
 		if d < nearestDist then nearestDist = d end
@@ -307,16 +291,6 @@ RunService.Heartbeat:Connect(function()
 	local placeableCount = 0
 	for _, p in ipairs(PLACEABLE_FOLDER:GetDescendants()) do
 		if p:IsA("BasePart") then placeableCount += 1 end
-	end
-
-	if not scriptEnabled then
-		setDebug("⏸ Скрипт выключен")
-		return
-	end
-
-	if isMoving then
-		setDebug("🏃 Скольжу к безопасному месту...")
-		return
 	end
 
 	setDebug(string.format(
@@ -334,10 +308,8 @@ RunService.Heartbeat:Connect(function()
 	local safePos    = findSafeTarget(playerPos, enemyPositions, ignoreList)
 
 	if safePos then
-		isMoving = true
 		task.spawn(function()
 			slideAlongFloor(hrp, safePos, ignoreList)
-			isMoving = false
 		end)
 	else
 		setDebug("❌ Безопасная точка не найдена!")
@@ -346,7 +318,6 @@ end)
 
 player.CharacterAdded:Connect(function(newChar)
 	character = newChar
-	isMoving  = false
 end)
 
 highlightAllEnemies()
