@@ -1,11 +1,9 @@
 -- LocalScript | StarterPlayerScripts
--- Подсветка enemy + пошаговый безопасный телепорт (anti-cheat friendly)
 
-local Players      = game:GetService("Players")
-local RunService   = game:GetService("RunService")
+local Players          = game:GetService("Players")
+local RunService       = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
-local Workspace    = game:GetService("Workspace")
-local TweenService = game:GetService("TweenService")
+local Workspace        = game:GetService("Workspace")
 
 local player    = Players.LocalPlayer
 local character = player.Character or player.CharacterAdded:Wait()
@@ -16,71 +14,72 @@ local ENTITIES_FOLDER  = MAP:WaitForChild("Entities")
 local PLACEABLE_FOLDER = MAP:WaitForChild("Placeable")
 
 -- ─── Настройки ────────────────────────────────────────────────
-local ENEMY_DANGER_RADIUS    = 20    -- радиус угрозы от enemy
-local SAFE_FROM_ENEMY_RADIUS = 35    -- мин. дистанция от enemy у цели
-local MAX_TELEPORT_DIST      = 150   -- макс. дальность поиска точки (можно далеко)
+local ENEMY_DANGER_RADIUS    = 20
+local SAFE_FROM_ENEMY_RADIUS = 35
+local MAX_TELEPORT_DIST      = 150
 local MIN_TELEPORT_DIST      = 6
 local CHECK_INTERVAL         = 0.5
+local TELEPORT_COOLDOWN      = 2.0
 
-local STEP_SIZE              = 8     -- studs за один шаг (anti-cheat friendly)
-local STEP_DELAY             = 0.07  -- секунды между шагами
-local TELEPORT_COOLDOWN      = 2.0   -- cooldown после телепорта
+-- Скольжение по полу
+local SLIDE_STEP_SIZE  = 4    -- studs за шаг горизонтально
+local SLIDE_STEP_DELAY = 0.05 -- секунды между шагами
+local PLAYER_HEIGHT    = 3.0  -- высота над полом
+local RAY_DOWN_DIST    = 40   -- насколько далеко вниз ищем пол
+local RAY_UP_OFFSET    = 10   -- откуда вверх начинаем луч (на случай склонов)
 
-local HIGHLIGHT_FILL         = Color3.fromRGB(255, 30, 30)
-local HIGHLIGHT_OUTLINE      = Color3.fromRGB(255, 160, 0)
+local HIGHLIGHT_FILL    = Color3.fromRGB(255, 30, 30)
+local HIGHLIGHT_OUTLINE = Color3.fromRGB(255, 160, 0)
 -- ──────────────────────────────────────────────────────────────
 
 local scriptEnabled    = true
 local teleportCooldown = false
 
 -- ═══════════════════════════════════════════════════════════════
--- GUI: кнопка включения/выключения
+-- GUI Toggle
 -- ═══════════════════════════════════════════════════════════════
 local screenGui = Instance.new("ScreenGui")
-screenGui.Name             = "SafeTPGui"
-screenGui.ResetOnSpawn     = false
-screenGui.ZIndexBehavior   = Enum.ZIndexBehavior.Sibling
-screenGui.Parent           = playerGui
+screenGui.Name           = "SafeTPGui"
+screenGui.ResetOnSpawn   = false
+screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+screenGui.Parent         = playerGui
 
 local btn = Instance.new("TextButton")
-btn.Size            = UDim2.new(0, 160, 0, 40)
-btn.Position        = UDim2.new(1, -170, 0, 10) -- правый верхний угол
-btn.AnchorPoint     = Vector2.new(0, 0)
+btn.Size             = UDim2.new(0, 160, 0, 40)
+btn.Position         = UDim2.new(1, -170, 0, 10)
+btn.AnchorPoint      = Vector2.new(0, 0)
 btn.BackgroundColor3 = Color3.fromRGB(40, 180, 80)
-btn.TextColor3      = Color3.fromRGB(255, 255, 255)
-btn.Text            = "✅ SafeTP: ВКЛ"
-btn.Font            = Enum.Font.GothamBold
-btn.TextSize        = 15
-btn.BorderSizePixel = 0
-btn.Parent          = screenGui
+btn.TextColor3       = Color3.fromRGB(255, 255, 255)
+btn.Text             = "✅ SafeTP: ВКЛ"
+btn.Font             = Enum.Font.GothamBold
+btn.TextSize         = 15
+btn.BorderSizePixel  = 0
+btn.Parent           = screenGui
 
 local corner = Instance.new("UICorner")
 corner.CornerRadius = UDim.new(0, 10)
-corner.Parent       = btn
+corner.Parent = btn
 
 local function updateButton()
 	if scriptEnabled then
 		btn.BackgroundColor3 = Color3.fromRGB(40, 180, 80)
-		btn.Text             = "✅ SafeTP: ВКЛ"
+		btn.Text = "✅ SafeTP: ВКЛ"
 	else
 		btn.BackgroundColor3 = Color3.fromRGB(180, 40, 40)
-		btn.Text             = "❌ SafeTP: ВЫКЛ"
+		btn.Text = "❌ SafeTP: ВЫКЛ"
 	end
 end
 
 btn.MouseButton1Click:Connect(function()
 	scriptEnabled = not scriptEnabled
 	updateButton()
-	print("[SafeTP] Скрипт:", scriptEnabled and "ВКЛЮЧЁН" or "ВЫКЛЮЧЁН")
 end)
 
--- Также Toggle на клавишу F5
 UserInputService.InputBegan:Connect(function(input, gpe)
 	if gpe then return end
 	if input.KeyCode == Enum.KeyCode.F5 then
 		scriptEnabled = not scriptEnabled
 		updateButton()
-		print("[SafeTP] Скрипт:", scriptEnabled and "ВКЛЮЧЁН" or "ВЫКЛЮЧЁН")
 	end
 end)
 
@@ -118,7 +117,7 @@ ENTITIES_FOLDER.ChildAdded:Connect(function(child)
 end)
 
 -- ═══════════════════════════════════════════════════════════════
--- Логика поиска безопасной позиции
+-- Утилиты
 -- ═══════════════════════════════════════════════════════════════
 local function getEnemyPositions()
 	local positions = {}
@@ -144,12 +143,21 @@ local function isSafeFromEnemies(pos, enemyPositions)
 	return true
 end
 
-local function getSurfaceBelow(pos, ignoreList)
+-- Ищет пол под указанной XZ позицией, возвращает Y поверхности или nil
+local function findFloorY(xzPos, currentY, ignoreList)
 	local params = RaycastParams.new()
 	params.FilterDescendantsInstances = ignoreList
 	params.FilterType = Enum.RaycastFilterType.Exclude
-	local result = Workspace:Raycast(pos + Vector3.new(0, 4, 0), Vector3.new(0, -12, 0), params)
-	return result and result.Position or nil
+
+	-- Луч сверху вниз
+	local origin    = Vector3.new(xzPos.X, currentY + RAY_UP_OFFSET, xzPos.Z)
+	local direction = Vector3.new(0, -(RAY_DOWN_DIST + RAY_UP_OFFSET), 0)
+	local result    = Workspace:Raycast(origin, direction, params)
+
+	if result then
+		return result.Position.Y
+	end
+	return nil
 end
 
 local function findSafeTarget(playerPos, enemyPositions, ignoreList)
@@ -157,7 +165,7 @@ local function findSafeTarget(playerPos, enemyPositions, ignoreList)
 
 	for _, part in ipairs(PLACEABLE_FOLDER:GetDescendants()) do
 		if part:IsA("BasePart") then
-			local targetPos = part.Position + Vector3.new(0, part.Size.Y / 2 + 3.5, 0)
+			local targetPos = part.Position + Vector3.new(0, part.Size.Y / 2 + PLAYER_HEIGHT, 0)
 			local dist      = (targetPos - playerPos).Magnitude
 
 			if dist >= MIN_TELEPORT_DIST and dist <= MAX_TELEPORT_DIST then
@@ -166,13 +174,12 @@ local function findSafeTarget(playerPos, enemyPositions, ignoreList)
 		end
 	end
 
-	-- Сортируем по расстоянию (ближние первые)
 	table.sort(candidates, function(a, b) return a.dist < b.dist end)
 
 	for _, c in ipairs(candidates) do
-		local surface = getSurfaceBelow(c.pos, ignoreList)
-		if surface and isSafeFromEnemies(c.pos, enemyPositions) then
-			return surface + Vector3.new(0, 3, 0)
+		local floorY = findFloorY(Vector2.new(c.pos.X, c.pos.Z), c.pos.Y, ignoreList)
+		if floorY and isSafeFromEnemies(c.pos, enemyPositions) then
+			return Vector3.new(c.pos.X, floorY + PLAYER_HEIGHT, c.pos.Z)
 		end
 	end
 
@@ -180,39 +187,69 @@ local function findSafeTarget(playerPos, enemyPositions, ignoreList)
 end
 
 -- ═══════════════════════════════════════════════════════════════
--- Пошаговый телепорт (anti-cheat friendly)
--- Перемещает игрока маленькими шагами по STEP_SIZE studs
+-- Скольжение по полу (основной метод)
+-- Движется горизонтально маленькими шагами, на каждом шаге
+-- кастит вниз и ставит игрока точно на пол
 -- ═══════════════════════════════════════════════════════════════
-local function stepTeleport(hrp, targetPos)
-	local currentPos = hrp.Position
+local function slideAlongFloor(hrp, targetPos, ignoreList)
+	local startPos = hrp.Position
 
-	-- Считаем сколько шагов нужно
-	local totalDist = (targetPos - currentPos).Magnitude
-	local steps     = math.ceil(totalDist / STEP_SIZE)
+	-- Двигаемся только по XZ плоскости
+	local startXZ  = Vector2.new(startPos.X, startPos.Z)
+	local targetXZ = Vector2.new(targetPos.X, targetPos.Z)
+	local totalXZ  = (targetXZ - startXZ).Magnitude
+
+	if totalXZ < 0.5 then return end
+
+	local steps    = math.max(1, math.ceil(totalXZ / SLIDE_STEP_SIZE))
+	local dirXZ    = (targetXZ - startXZ).Unit
+
+	local currentY = startPos.Y -- стартовая высота
+	local floorLostCount = 0    -- счётчик потерь пола подряд
 
 	for i = 1, steps do
-		-- Проверяем что персонаж ещё жив
+		-- Проверяем живой ли персонаж
 		local char = player.Character
 		if not char then break end
 		local h = char:FindFirstChildOfClass("Humanoid")
 		if not h or h.Health <= 0 then break end
 
-		local alpha    = i / steps
-		local stepPos  = currentPos:Lerp(targetPos, alpha)
+		local stepDist = math.min(SLIDE_STEP_SIZE, totalXZ - (i - 1) * SLIDE_STEP_SIZE)
+		local newXZ    = startXZ + dirXZ * (i * SLIDE_STEP_SIZE)
 
-		-- Ищем поверхность на каждом промежуточном шаге
-		local ignoreList = { char }
-		local surface = getSurfaceBelow(stepPos, ignoreList)
-		if surface then
-			stepPos = surface + Vector3.new(0, 3, 0)
+		-- Clamp к цели чтобы не перелететь
+		if i == steps then
+			newXZ = targetXZ
 		end
 
-		hrp.CFrame = CFrame.new(stepPos)
-		task.wait(STEP_DELAY)
+		-- Ищем пол на новой XZ позиции
+		local floorY = findFloorY(newXZ, currentY, ignoreList)
+
+		if floorY then
+			currentY = floorY
+			floorLostCount = 0
+			hrp.CFrame = CFrame.new(Vector3.new(newXZ.X, floorY + PLAYER_HEIGHT, newXZ.Y))
+		else
+			-- Пол не найден на этом шаге
+			floorLostCount = floorLostCount + 1
+
+			if floorLostCount >= 3 then
+				-- 3 шага подряд нет пола — останавливаемся
+				print("[SafeTP] Пол потерян, останавливаюсь.")
+				break
+			end
+			-- Иначе пробуем двигаться дальше с той же высотой
+			hrp.CFrame = CFrame.new(Vector3.new(newXZ.X, currentY + PLAYER_HEIGHT, newXZ.Y))
+		end
+
+		task.wait(SLIDE_STEP_DELAY)
 	end
 
-	-- Финальная точная установка
-	hrp.CFrame = CFrame.new(targetPos)
+	-- Финальная точная установка на целевой Y
+	local finalFloor = findFloorY(targetXZ, currentY, ignoreList)
+	if finalFloor then
+		hrp.CFrame = CFrame.new(Vector3.new(targetPos.X, finalFloor + PLAYER_HEIGHT, targetPos.Z))
+	end
 end
 
 -- ═══════════════════════════════════════════════════════════════
@@ -233,7 +270,6 @@ RunService.Heartbeat:Connect(function()
 	local humanoid = character:FindFirstChildOfClass("Humanoid")
 	if not hrp or not humanoid or humanoid.Health <= 0 then return end
 
-	-- Проверяем угрозу
 	local enemyPositions = getEnemyPositions()
 	local playerPos      = hrp.Position
 	local inDanger       = false
@@ -247,15 +283,14 @@ RunService.Heartbeat:Connect(function()
 
 	if not inDanger then return end
 
-	-- Ищем безопасную точку
 	local ignoreList = { character }
 	local safePos    = findSafeTarget(playerPos, enemyPositions, ignoreList)
 
 	if safePos then
 		teleportCooldown = true
-		print("[SafeTP] Телепортирую по шагам →", safePos)
+		print("[SafeTP] Скольжу к:", safePos)
 		task.spawn(function()
-			stepTeleport(hrp, safePos)
+			slideAlongFloor(hrp, safePos, ignoreList)
 			task.wait(TELEPORT_COOLDOWN)
 			teleportCooldown = false
 		end)
@@ -268,6 +303,5 @@ player.CharacterAdded:Connect(function(newChar)
 	character = newChar
 end)
 
--- Запуск
 highlightAllEnemies()
 print("[SafeTP] Скрипт запущен. Кнопка справа вверху / F5 — toggle.")
